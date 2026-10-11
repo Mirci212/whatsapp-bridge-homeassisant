@@ -62,26 +62,40 @@ let currentStt = process.env.STT_ENGINE || null;
 // -------------------------------------------------------------
 const AUTH_DIR = fs.existsSync("/data") ? "/data/auth_info_baileys" : path.join(__dirname, "auth_info_baileys");
 
-// Parsing der ALLOWED_USERS
-const ALLOWED_USERS = []; 
-const ADDRESS_BOOK = {};  
+// Einheitlicher Parser für "ID:Name"-Listen (am ersten Doppelpunkt trennen).
+// ALLOWED_USERS="436...:Marco,43...:Brigitte", GROUP_IDS="120363...@g.us:Familie"
+function parseIdNameList(envValue) {
+  const out = [];
+  if (!envValue) return out;
+  for (const entry of envValue.split(",")) {
+    const idx = entry.indexOf(":");
+    if (idx < 0) {
+      console.warn(`[Config] Ignoriere ungültigen Eintrag (Format "ID:Name" erwartet): "${entry.trim()}"`);
+      continue;
+    }
+    const id = entry.slice(0, idx).trim();
+    const name = entry.slice(idx + 1).trim();
+    if (id && name) out.push({ id, name });
+    else console.warn(`[Config] Ignoriere ungültigen Eintrag (Format "ID:Name" erwartet): "${entry.trim()}"`);
+  }
+  return out;
+}
+
+// Parsing der ALLOWED_USERS (Format: "Nummer:Name")
+const ALLOWED_USERS = [];
+const ADDRESS_BOOK = {};
 const NUMBER_TO_NAME = {};
 
-if (process.env.ALLOWED_USERS) {
-  const entries = process.env.ALLOWED_USERS.split(",");
-  entries.forEach((entry) => {
-    const [rawNum, rawName] = entry.split(":");
-    if (rawNum && rawName) {
-      const cleanNum = rawNum.replace(/[^0-9]/g, "").trim();
-      const cleanName = rawName.trim().toLowerCase();
-
-      if (cleanNum && cleanName) {
-        ALLOWED_USERS.push(cleanNum);
-        ADDRESS_BOOK[cleanName] = cleanNum;
-        NUMBER_TO_NAME[cleanNum] = rawName.trim();
-      }
-    }
-  });
+for (const { id, name } of parseIdNameList(process.env.ALLOWED_USERS)) {
+  const cleanNum = id.replace(/[^0-9]/g, "");
+  const cleanName = name.toLowerCase();
+  if (!cleanNum || !cleanName) continue;
+  if (ADDRESS_BOOK[cleanName] && ADDRESS_BOOK[cleanName] !== cleanNum) {
+    console.warn(`[Config] Doppelter Name "${name}" (bisher ${ADDRESS_BOOK[cleanName]}, jetzt ${cleanNum}) – letzter Eintrag gewinnt.`);
+  }
+  ALLOWED_USERS.push(cleanNum);
+  ADDRESS_BOOK[cleanName] = cleanNum;
+  NUMBER_TO_NAME[cleanNum] = name;
 }
 
 if (ADMIN_NUMBER && !ALLOWED_USERS.includes(ADMIN_NUMBER)) {
@@ -144,16 +158,18 @@ async function fetchAvailableAgents() {
   }
 }
 
-// Gruppen-Adressbuch: GROUP_IDS="Familie:120363012345678@g.us,Team:120363...@g.us"
+// Gruppen-Adressbuch, gleiches Format wie ALLOWED_USERS: GROUP_IDS="120363...@g.us:Familie"
 const GROUP_BOOK = {};
-if (process.env.GROUP_IDS) {
-  process.env.GROUP_IDS.split(",").forEach((entry) => {
-    const [rawName, rawJid] = entry.split(":");
-    if (rawName && rawJid) {
-      const jid = rawJid.trim();
-      if (jid.toLowerCase().endsWith("@g.us")) GROUP_BOOK[rawName.trim().toLowerCase()] = jid;
-    }
-  });
+for (const { id, name } of parseIdNameList(process.env.GROUP_IDS)) {
+  if (!id.toLowerCase().endsWith("@g.us")) {
+    console.warn(`[Config] Ignoriere Gruppen-Eintrag ohne @g.us-JID: "${id}"`);
+    continue;
+  }
+  const cleanName = name.toLowerCase();
+  if (GROUP_BOOK[cleanName] && GROUP_BOOK[cleanName] !== id) {
+    console.warn(`[Config] Doppelter Gruppenname "${name}" – letzter Eintrag gewinnt.`);
+  }
+  GROUP_BOOK[cleanName] = id;
 }
 
 function resolveTargetJid(recipient) {
@@ -167,7 +183,7 @@ function resolveTargetJid(recipient) {
   if (!targetNumber) {
     const isNumeric = /^\+?\d+$/.test(cleanRecipient);
     if (isNumeric) {
-      targetNumber = cleanRecipient.replace("+", "").trim();
+      targetNumber = cleanRecipient.replace(/^\+/, "");
     } else {
       return null;
     }
@@ -261,16 +277,10 @@ async function resolvePhoneNumber(msg, keys) {
     }
   } catch (err) {}
 
-  if (msg.pushName) {
-    const pushNameLower = msg.pushName.trim().toLowerCase();
-    if (ADDRESS_BOOK[pushNameLower]) {
-      const matchedNumber = ADDRESS_BOOK[pushNameLower];
-      registerLidMapping(lidId, matchedNumber);
-      return matchedNumber;
-    }
-  }
-
-  return lidId;
+  // WICHTIG: kein pushName-Fallback! Der Anzeigename ist frei wählbar –
+  // jeder könnte sich "Brigitte" nennen und wäre sonst als sie erkannt.
+  // Ohne echte JID-Auflösung wird der Absender abgewiesen.
+  return null;
 }
 
 async function startBot() {
@@ -322,6 +332,10 @@ async function startBot() {
       if (msg.key.fromMe) continue;
 
       const senderNumber = await resolvePhoneNumber(msg, state.keys);
+      if (!senderNumber) {
+        console.log(`[Zugriff verweigert] Absender nicht auflösbar (remoteJid:${msg.key.remoteJid || "?"} participant:${msg.key.participant || "?"} Name:${msg.pushName || "?"})`);
+        continue;
+      }
       const pushName = msg.pushName || NUMBER_TO_NAME[senderNumber] || "Unbekannt";
       const isAdmin = ADMIN_NUMBER && senderNumber === ADMIN_NUMBER;
 
@@ -468,7 +482,7 @@ async function startBot() {
           } else {
             const lines = list.map(g => `• ${g.subject}\n  \`${g.id}\``);
             await sock.sendMessage(senderJid, {
-              text: `👥 *Gruppen des Bots (${list.length}):*\n\n` + lines.join("\n") + `\n\nNutze die ID als Empfänger oder trage sie in GROUP_IDS ein (z. B. \`Familie:<id>\`).`
+              text: `👥 *Gruppen des Bots (${list.length}):*\n\n` + lines.join("\n") + `\n\nNutze die ID als Empfänger oder trage sie in GROUP_IDS ein (z. B. \`<id>:Familie\`).`
             });
           }
         } catch (e) {

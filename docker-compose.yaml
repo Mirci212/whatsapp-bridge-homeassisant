@@ -13,6 +13,7 @@ services:
       - CONVERSATION_AGENT=conversation.gemini_live
       - ALLOWED_USERS=436***:Marco,43****:Brigitte
       - STT_ENGINE=stt.faster_whisper
+      - GROUP_IDS=120363012345678@g.us:Familie
       - ADMIN_NUMBER=436***
     volumes:
       - ha_bridge_auth:/app/auth_info_baileys
