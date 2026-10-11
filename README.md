@@ -129,8 +129,8 @@ rest_command:
       Content-Type: "application/json"
     payload: >
       {
-        "recipient": "{{ recipient }}",
-        "message": "{{ message }}"
+        "recipient": {{ recipient | to_json }},
+        "message": {{ message | to_json }}
       }
 
   whatsapp_send_poll:
@@ -140,8 +140,8 @@ rest_command:
       Content-Type: "application/json"
     payload: >
       {
-        "recipient": "{{ recipient }}",
-        "title": "{{ title }}",
+        "recipient": {{ recipient | to_json }},
+        "title": {{ title | to_json }},
         "options": {{ options | to_json }}
       }
 
