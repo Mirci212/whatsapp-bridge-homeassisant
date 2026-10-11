@@ -20,10 +20,12 @@ schema:
   ALLOWED_USERS: string
   CONVERSATION_AGENT: string
   STT_ENGINE: string
+  GROUP_IDS: string
 options:
   ADMIN_NUMBER: ""
   ALLOWED_USERS: ""
   CONVERSATION_AGENT: ""
   STT_ENGINE: ""
+  GROUP_IDS: ""
 environment:
   PORT: "3000"

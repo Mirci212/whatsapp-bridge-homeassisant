@@ -144,8 +144,24 @@ async function fetchAvailableAgents() {
   }
 }
 
+// Gruppen-Adressbuch: GROUP_IDS="Familie:120363012345678@g.us,Team:120363...@g.us"
+const GROUP_BOOK = {};
+if (process.env.GROUP_IDS) {
+  process.env.GROUP_IDS.split(",").forEach((entry) => {
+    const [rawName, rawJid] = entry.split(":");
+    if (rawName && rawJid) {
+      const jid = rawJid.trim();
+      if (jid.toLowerCase().endsWith("@g.us")) GROUP_BOOK[rawName.trim().toLowerCase()] = jid;
+    }
+  });
+}
+
 function resolveTargetJid(recipient) {
   const cleanRecipient = recipient.toLowerCase().trim();
+  // Direkte Gruppen-JID (z.B. "120363012345678@g.us") immer durchlassen
+  if (cleanRecipient.endsWith("@g.us")) return recipient.trim();
+  // Gruppenname aus GROUP_IDS
+  if (GROUP_BOOK[cleanRecipient]) return GROUP_BOOK[cleanRecipient];
   let targetNumber = ADDRESS_BOOK[cleanRecipient];
 
   if (!targetNumber) {
@@ -369,6 +385,7 @@ async function startBot() {
             "\n\n👑 *Admin-Befehle:*\n" +
             "• `/setagent [id]` - Agent setzen oder alle anzeigen\n" +
             "• `/setstt [id]` - STT-Engine setzen oder anzeigen\n" +
+            "• `/groups` - Gruppen mit IDs auflisten\n" +
             "• `/restart` - Startet den Bot neu";
         }
 
@@ -433,6 +450,29 @@ async function startBot() {
         } else {
           currentStt = newStt;
           await sock.sendMessage(senderJid, { text: `✅ STT-Engine geändert zu:\n\`${currentStt}\`` });
+        }
+        continue;
+      }
+
+      // --- ADMIN: GRUPPEN AUFLISTEN (IDs für GROUP_IDS / recipient) ---
+      if (cleanCmd === "/groups") {
+        if (!isAdmin) {
+          await sock.sendMessage(senderJid, { text: "❌ Dieser Befehl ist nur dem Administrator vorbehalten." });
+          continue;
+        }
+        try {
+          const groups = await sock.groupFetchAllParticipating();
+          const list = Object.values(groups);
+          if (!list.length) {
+            await sock.sendMessage(senderJid, { text: "📭 Der Bot ist in keiner Gruppe." });
+          } else {
+            const lines = list.map(g => `• ${g.subject}\n  \`${g.id}\``);
+            await sock.sendMessage(senderJid, {
+              text: `👥 *Gruppen des Bots (${list.length}):*\n\n` + lines.join("\n") + `\n\nNutze die ID als Empfänger oder trage sie in GROUP_IDS ein (z. B. \`Familie:<id>\`).`
+            });
+          }
+        } catch (e) {
+          await sock.sendMessage(senderJid, { text: `Fehler beim Abrufen der Gruppen: ${e.message}` });
         }
         continue;
       }
