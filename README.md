@@ -2,7 +2,7 @@
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with a specific URL](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/Mirci212/whatsapp-bridge-homeassisant)
 
-Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung von Home Assistant über WhatsApp. Der Bot nutzt die Baileys-Library für die WhatsApp-Anbindung und kommuniziert nahtlos mit Home Assistant (Conversation API, STT, TTS und Webhooks).
+Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung von Home Assistant über WhatsApp. Der Bot nutzt die Baileys-Library für die WhatsApp-Anbindung und kommuniziert nahtlos mit Home Assistant (Conversation API, STT und Webhooks). Antworten kommen immer als Text.
 
 ---
 
@@ -10,7 +10,7 @@ Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung 
 
 - **Sprach- & Textsteuerung:** Leitet eingehende Nachrichten (sowie transkribierte Sprachnachrichten via Whisper) direkt an den Home Assistant Conversation Agenten weiter.
 - **Interaktive Umfragen & Nachrichten:** Webhook-APIs zum Senden von Textnachrichten (`/send-message`) und Umfragen/Polls (`/send-poll`) – perfekt für UI-Skripte in Home Assistant.
-- **Admin-Steuerung per Chat:** Der definierte Administrator kann im laufenden Betrieb Agenten, TTS- und STT-Engines wechseln, den Bot neu starten oder Chats bereinigen.
+- **Admin-Steuerung per Chat:** Der definierte Administrator kann im laufenden Betrieb Agenten und STT-Engine wechseln sowie den Bot neu starten.
 - **Kein Chat-Verlauf auf der Bridge:** Die Bridge speichert keine Chat-Verläufe – jede Nachricht wird direkt an Home Assistant weitergereicht.
 - **Zahlen-Fallback-Menü:** Einfache Zifferneingaben (`1`, `2`, `3`) als stabile Alternative zu interaktiven Buttons.
 - **Dual-Deployment:** Kann sowohl als offizielles **Home Assistant Add-on** (aus dem Repository im Unterordner `whatsapp_bridge`)[cite: 3, 4] als auch als **Standalone Docker Container** (über GHCR) betrieben werden.
@@ -49,7 +49,6 @@ services:
       - ALLOWED_USERS=436****:Marco,436***:Brigitte
       - CONVERSATION_AGENT=conversation.google_generative_ai
       - STT_ENGINE=stt.whisper
-      - TTS_ENGINE=tts.piper
     volumes:
       - ha_bridge_auth:/app/auth_info_baileys
 
@@ -75,7 +74,6 @@ Eingehende Nachrichten von erlaubten Nummern werden verarbeitet. Zusätzlich ste
 ### 👑 Admin-Befehle (nur für `ADMIN_NUMBER`)
 
 * `/setagent [id]` — Setzt den Agenten oder listet alle verfügbaren HA-Agenten auf.
-* `/settts [id]` — Setzt die TTS-Engine oder zeigt Optionen.
 * `/setstt [id]` — Setzt die STT-Engine oder zeigt Optionen.
 * `/restart` — Startet den Bot-Dienst neu.
 

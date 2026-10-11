@@ -55,7 +55,6 @@ const ADMIN_NUMBER = process.env.ADMIN_NUMBER ? process.env.ADMIN_NUMBER.replace
 // Dynamische Laufzeit-Variablen
 let currentAgent = process.env.CONVERSATION_AGENT || null;
 let currentStt = process.env.STT_ENGINE || null;
-let currentTts = process.env.TTS_ENGINE || null;
 
 // -------------------------------------------------------------
 // Persistenter Speicher: im HA Add-on ist nur /data persistent,
@@ -158,57 +157,6 @@ function resolveTargetJid(recipient) {
     }
   }
   return `${targetNumber}@s.whatsapp.net`;
-}
-
-async function textToSpeech(text) {
-  if (!currentTts) return null;
-
-  try {
-    const urlResponse = await axios.post(
-      haUrl("/api/tts_get_url"),
-      {
-        engine_id: currentTts,
-        message: text,
-        language: "de",
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${HA_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const returnedUrl = urlResponse.data?.url;
-    if (!returnedUrl || typeof returnedUrl !== "string") {
-      console.error("[HA TTS] Home Assistant hat keine Audio-URL zurückgegeben.");
-      return null;
-    }
-
-    let audioUrl;
-    try {
-      audioUrl = new URL(returnedUrl, `${HA_URL}/`).toString();
-    } catch (error) {
-      console.error("[HA TTS] Ungültige Audio-URL von Home Assistant:", returnedUrl);
-      return null;
-    }
-
-    const audioResponse = await axios.get(audioUrl, {
-      responseType: "arraybuffer",
-      headers: {
-        Authorization: `Bearer ${HA_TOKEN}`,
-      },
-    });
-
-    const contentType = audioResponse.headers["content-type"]?.split(";")[0];
-    return {
-      buffer: Buffer.from(audioResponse.data),
-      mimetype: contentType?.startsWith("audio/") ? contentType : "audio/ogg",
-    };
-  } catch (error) {
-    console.error("[HA TTS] Fehler bei TTS-Generierung:", error.response?.data || error.message);
-  }
-  return null;
 }
 
 async function transcribeAudio(msg) {
@@ -420,7 +368,6 @@ async function startBot() {
           helpMsg += 
             "\n\n👑 *Admin-Befehle:*\n" +
             "• `/setagent [id]` - Agent setzen oder alle anzeigen\n" +
-            "• `/settts [id]` - TTS-Engine setzen oder anzeigen\n" +
             "• `/setstt [id]` - STT-Engine setzen oder anzeigen\n" +
             "• `/restart` - Startet den Bot neu";
         }
@@ -434,7 +381,7 @@ async function startBot() {
           "🟢 *System Status*\n\n" +
           `• Home Assistant: ${HA_URL}\n` +
           `• STT Engine: ${currentStt || "Nicht aktiv"}\n` +
-          `• TTS Engine: ${currentTts || "Nicht aktiv"}\n` +
+
           `• Aktiver Agent: ${currentAgent || "Default"}\n` +
           `• Admin-Modus: ${isAdmin ? "Aktiv (" + senderNumber + ")" : "Nein"}\n` +
           `• Aktive Session: ${userConversations[senderNumber] ? "Ja" : "Nein"}`;
@@ -468,24 +415,6 @@ async function startBot() {
         } else {
           currentAgent = newAgent;
           await sock.sendMessage(senderJid, { text: `✅ Konversations-Agent geändert zu:\n\`${currentAgent}\`` });
-        }
-        continue;
-      }
-
-      // --- ADMIN: TTS ENGINE SETZEN ODER AUFLISTEN ---
-      if (cleanCmd.startsWith("/settts")) {
-        if (!isAdmin) {
-          await sock.sendMessage(senderJid, { text: "❌ Dieser Befehl ist nur dem Administrator vorbehalten." });
-          continue;
-        }
-        const newTts = text.replace("/settts", "").trim();
-        if (!newTts) {
-          await sock.sendMessage(senderJid, {
-            text: `🗣️ *TTS Engine*\nAktuell aktiv: \`${currentTts || "Nicht aktiv"}\`\n\nGib den Namen der Engine ein (z. B. \`/settts tts.piper\` oder \`/settts google_translate_say\`).`
-          });
-        } else {
-          currentTts = newTts;
-          await sock.sendMessage(senderJid, { text: `✅ TTS-Engine geändert zu:\n\`${currentTts}\`` });
         }
         continue;
       }
@@ -563,22 +492,8 @@ async function startBot() {
         const responseText =
           haResponse.data?.response?.speech?.plain?.speech || "Befehl ausgeführt.";
 
-        let sentAudio = false;
-        if (isAudio && currentTts) {
-          const audio = await textToSpeech(responseText);
-          if (audio) {
-            await sock.sendMessage(senderJid, {
-              audio: audio.buffer,
-              mimetype: audio.mimetype,
-              ptt: true,
-            });
-            sentAudio = true;
-          }
-        }
-
-        if (!sentAudio) {
-          await sock.sendMessage(senderJid, { text: responseText });
-        }
+        // Immer als Text antworten (kein TTS / keine Sprachantwort)
+        await sock.sendMessage(senderJid, { text: responseText });
       } catch (error) {
         logHaError("HA Conversation", error);
         await sock.sendMessage(senderJid, {
