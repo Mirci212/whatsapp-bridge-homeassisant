@@ -12,6 +12,9 @@ services:
       - WHATSAPP_NOWEB_STORE_FULL_SYNC=true
       - WHATSAPP_HOOK_URL=http://whatsapp-ha-bridge:3000/waha/webhook
       - WHATSAPP_HOOK_EVENTS=message,poll.vote,session.status
+      # Basis-URL, mit der WAHA media.url baut. Muss von der Bridge aus erreichbar
+      # sein (Default waere localhost = die Bridge fragt sich selbst -> 404).
+      - WAHA_BASE_URL=http://waha:3000
     volumes:
       - waha_sessions:/app/.sessions
 

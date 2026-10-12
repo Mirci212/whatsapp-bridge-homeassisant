@@ -475,6 +475,26 @@ async function fetchAvailableAgents(senderNumber) {
   }
 }
 
+// WAHA baut media.url mit WAHA_BASE_URL (Default: http://localhost:3000).
+// Innerhalb von Docker zeigt localhost aber auf die Bridge selbst - darum den
+// Host solcher URLs auf WAHA_URL umschreiben (Root-Fix ist WAHA_BASE_URL in
+// docker-compose.yaml, das hier ist das Sicherheitsnetz).
+function resolveWahaMediaUrl(mediaUrl) {
+  if (!mediaUrl) return mediaUrl;
+  if (!String(mediaUrl).startsWith("http")) {
+    return WAHA_URL + (String(mediaUrl).startsWith("/") ? mediaUrl : "/" + mediaUrl);
+  }
+  try {
+    const u = new URL(mediaUrl);
+    const wahaOrigin = new URL(WAHA_URL).origin;
+    if ((u.hostname === "localhost" || u.hostname === "127.0.0.1") && u.origin !== wahaOrigin) {
+      console.log("[HA STT] Schreibe Media-Host um: " + u.origin + " -> " + wahaOrigin);
+      return wahaOrigin + u.pathname + u.search;
+    }
+  } catch (e) {}
+  return mediaUrl;
+}
+
 // Fehler-Bodys (Buffer/String/JSON) lesbar machen, max 300 Zeichen.
 function decodeHaBody(data) {
   try {
@@ -491,7 +511,7 @@ async function transcribeWahaMedia(mediaUrl, senderNumber) {
     console.error("[HA STT] Keine STT_ENGINE aktiv.");
     return null;
   }
-  const absoluteUrl = mediaUrl.startsWith("http") ? mediaUrl : WAHA_URL + (mediaUrl.startsWith("/") ? mediaUrl : "/" + mediaUrl);
+  const absoluteUrl = resolveWahaMediaUrl(mediaUrl);
   const urlForLog = absoluteUrl.replace(/([?&]api[_-]?key=)[^&]*/i, "$1***");
   const uniqueId = Date.now();
   const tmpInPath = path.join(__dirname, "tmp_" + uniqueId + ".bin");
