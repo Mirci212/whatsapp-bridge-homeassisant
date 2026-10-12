@@ -180,59 +180,83 @@ function phoneFromWahaContact(obj) {
   return null;
 }
 
+// Chats-Liste einmal laden und alle LID<->Nummer-Paare daraus cachen.
+// GET /api/{session}/chats?merge=true verbindet LID- (@lid) und
+// Nummern-Chats (@c.us) desselben Kontakts (siehe Swagger: Chats).
+let chatsScannedAt = 0;
+async function scanChatsForLids() {
+  if (Date.now() - chatsScannedAt < 60000 && Object.keys(lidToPhoneCache).length) return;
+  chatsScannedAt = Date.now();
+  const paths = [
+    "/api/" + encodeURIComponent(WAHA_SESSION) + "/chats?merge=true&limit=500",
+    "/api/" + encodeURIComponent(WAHA_SESSION) + "/chats?limit=500",
+  ];
+  for (const p of paths) {
+    try {
+      const res = await waha.get(p);
+      const list = Array.isArray(res.data) ? res.data : res.data.chats || res.data.data || [];
+      let found = 0;
+      for (const c of list) {
+        // Gemergte Chats tragen beide Adressen (z.B. id + lid oder phoneNumber).
+        const fields = [
+          c.id, c.chatId, c.jid, c.lid,
+          c.phoneNumber, c.number, c.pn,
+          c.mergedId, c.mergedWith,
+          c.contact && c.contact.id, c.contact && c.contact.lid,
+          c.contact && c.contact.phoneNumber,
+        ].filter(Boolean).map(String);
+        let num = null;
+        let lidU = null;
+        for (const f of fields) {
+          const n = phoneFromChatId(f);
+          if (n) num = num || n;
+          const u = lidUserOf(f);
+          if (u) lidU = lidU || u;
+        }
+        if (num && lidU && !lidToPhoneCache[lidU]) {
+          lidToPhoneCache[lidU] = num;
+          found++;
+        }
+      }
+      console.log("[LID] Chats-Scan: " + list.length + " Chats, " + found + " neue LID-Zuordnungen.");
+      return;
+    } catch (e) {
+      console.warn("[LID] Chats-Scan fehlgeschlagen (" + p + "): " + (e.response ? e.response.status + " " + JSON.stringify(e.response.data).slice(0, 200) : e.message));
+    }
+  }
+}
+
 async function resolveLidToPhone(lidUser) {
   if (!lidUser) return null;
   if (lidToPhoneCache[lidUser]) return lidToPhoneCache[lidUser];
   const lid = lidUser + "@lid";
-  // 1) Direkter Kontakt-Lookup.
-  const contactPaths = [
-    "/api/" + encodeURIComponent(WAHA_SESSION) + "/contacts/" + encodeURIComponent(lid),
-    "/api/contacts/" + encodeURIComponent(lid) + "?session=" + encodeURIComponent(WAHA_SESSION),
+  // 1) Einzel-Chat abfragen: mit merge=true liefert WAHA ggf. direkt
+  //    beide Adressen des Kontakts zurueck.
+  const chatPaths = [
+    "/api/" + encodeURIComponent(WAHA_SESSION) + "/chats/" + encodeURIComponent(lid) + "?merge=true",
+    "/api/" + encodeURIComponent(WAHA_SESSION) + "/chats/" + encodeURIComponent(lid),
   ];
-  for (const p of contactPaths) {
+  for (const p of chatPaths) {
     try {
       const res = await waha.get(p);
       const num = phoneFromWahaContact(res.data);
       if (num) {
         lidToPhoneCache[lidUser] = num;
-        console.log("[LID] " + lid + " -> " + num + " (Kontakt-Lookup)");
+        console.log("[LID] " + lid + " -> " + num + " (Chat-Lookup)");
         return num;
       }
     } catch (e) {
-      if (!e.response || (e.response.status !== 404 && e.response.status !== 405)) {
-        console.warn("[LID] Kontakt-Lookup fehlgeschlagen (" + p + "): " + e.message);
+      const status = e.response ? e.response.status : null;
+      if (status !== 404 && status !== 405 && status !== 400) {
+        console.warn("[LID] Chat-Lookup fehlgeschlagen (" + p + "): " + e.message);
       }
     }
   }
-  // 2) Fallback: Kontaktliste durchsuchen (gecacht pro Bridge-Laufzeit via einmaligem Scan).
-  try {
-    const listPaths = [
-      "/api/" + encodeURIComponent(WAHA_SESSION) + "/contacts?limit=1000",
-      "/api/contacts?session=" + encodeURIComponent(WAHA_SESSION) + "&limit=1000",
-    ];
-    for (const p of listPaths) {
-      try {
-        const res = await waha.get(p);
-        const list = Array.isArray(res.data) ? res.data : res.data.contacts || res.data.data || [];
-        for (const c of list) {
-          const num = phoneFromWahaContact(c);
-          const lids = [c.lid, c.contact && c.contact.lid].filter(Boolean).map(String);
-          for (const l of lids) {
-            const u = l.split("@")[0];
-            if (u && num && !lidToPhoneCache[u]) lidToPhoneCache[u] = num;
-          }
-        }
-        if (lidToPhoneCache[lidUser]) {
-          console.log("[LID] " + lid + " -> " + lidToPhoneCache[lidUser] + " (Listen-Scan)");
-          return lidToPhoneCache[lidUser];
-        }
-        break;
-      } catch (e) {
-        if (!e.response || (e.response.status !== 404 && e.response.status !== 405)) throw e;
-      }
-    }
-  } catch (e) {
-    console.warn("[LID] Listen-Scan fehlgeschlagen: " + e.message);
+  // 2) Fallback: komplette Chats-Liste scannen und alle Paare cachen.
+  await scanChatsForLids();
+  if (lidToPhoneCache[lidUser]) {
+    console.log("[LID] " + lid + " -> " + lidToPhoneCache[lidUser] + " (Chats-Scan)");
+    return lidToPhoneCache[lidUser];
   }
   return null;
 }
