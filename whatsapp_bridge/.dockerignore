@@ -2,8 +2,11 @@
 node_modules
 npm-debug.log
 
-# WhatsApp Auth-Session & WhatsApp Cache (NIEMALS in das Image packen!)
-auth_info_baileys
+# Temporäre Audio-Dateien & lokale Sessions (NIEMALS in das Image packen!)
+tmp_*.bin
+tmp_*.wav
+tmp_*.ogg
+.sessions
 *.json.tmp
 
 # Sensible Umgebungsdateien

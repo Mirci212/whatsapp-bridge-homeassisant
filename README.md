@@ -2,7 +2,7 @@
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with a specific URL](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/Mirci212/whatsapp-bridge-homeassisant)
 
-Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung von Home Assistant über WhatsApp. Der Bot nutzt die Baileys-Library für die WhatsApp-Anbindung und kommuniziert nahtlos mit Home Assistant (Conversation API, STT und Webhooks). Antworten kommen immer als Text.
+Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung von Home Assistant über WhatsApp. Die WhatsApp-Anbindung läuft über die WAHA HTTP API (externer Container), die Bridge kommuniziert nahtlos mit Home Assistant (Conversation API, STT und Webhooks). Antworten kommen immer als Text.
 
 ---
 
@@ -12,6 +12,7 @@ Ein robuster und funktionsreicher Node.js-Service zur bidirektionalen Steuerung 
 - **Interaktive Umfragen & Nachrichten:** Webhook-APIs zum Senden von Textnachrichten (`/send-message`) und Umfragen/Polls (`/send-poll`) – perfekt für UI-Skripte in Home Assistant.
 - **Admin-Steuerung per Chat:** Der definierte Administrator kann im laufenden Betrieb Agenten und STT-Engine wechseln sowie den Bot neu starten.
 - **Kein Chat-Verlauf auf der Bridge:** Die Bridge speichert keine Chat-Verläufe – jede Nachricht wird direkt an Home Assistant weitergereicht.
+- **WAHA statt Baileys:** Kein eigenes Socket-Protokoll mehr – Session, Reconnect und QR-Pairing übernimmt der WAHA-Container über eine stabile REST + Webhook-Schnittstelle.
 - **Zahlen-Fallback-Menü:** Einfache Zifferneingaben (`1`, `2`, `3`) als stabile Alternative zu interaktiven Buttons.
 - **Dual-Deployment:** Kann sowohl als offizielles **Home Assistant Add-on** (aus dem Repository im Unterordner `whatsapp_bridge`)[cite: 3, 4] als auch als **Standalone Docker Container** (über GHCR) betrieben werden.
 
@@ -32,12 +33,32 @@ Du hast zwei Möglichkeiten, diesen Bot zu betreiben:
 
 Verwende folgendes `docker-compose.yml`-Beispiel:
 
+Das `docker-compose.yaml` im Repo startet zwei Container: **waha** (WhatsApp-Anbindung, Host-Port 3100) und **whatsapp-ha-bridge** (diese Bridge, Host-Port 3000). Lege einen langen `WAHA_API_KEY` in einer `.env` neben dem Compose-File ab:
+
+```env
+WAHA_API_KEY=dein_langer_zufaelliger_api_key
+```
+
 ```yaml
 services:
+  waha:
+    image: devlikeapro/waha:latest
+    ports:
+      - "3100:3000"
+    environment:
+      - WAHA_API_KEY=${WAHA_API_KEY}
+      - WHATSAPP_DEFAULT_ENGINE=WEBJS
+      - WHATSAPP_HOOK_URL=http://whatsapp-ha-bridge:3000/waha/webhook
+      - WHATSAPP_HOOK_EVENTS=message,poll.vote,session.status
+    volumes:
+      - waha_sessions:/app/.sessions
+
   whatsapp-ha-bridge:
     image: ghcr.io/DeinGitHubBenutzer/whatsapp-bridge-homeassistant:latest
     container_name: whatsapp_ha_bridge
     restart: unless-stopped
+    depends_on:
+      - waha
     ports:
       - "3000:3000"
     environment:
@@ -49,13 +70,24 @@ services:
       - ALLOWED_USERS=436****:Marco,436***:Brigitte
       - CONVERSATION_AGENT=conversation.google_generative_ai
       - STT_ENGINE=stt.whisper
-    volumes:
-      - ha_bridge_auth:/app/auth_info_baileys
+      - WAHA_URL=http://waha:3000
+      - WAHA_API_KEY=${WAHA_API_KEY}
+      - WAHA_SESSION=default
+      - WAHA_WEBHOOK_URL=http://whatsapp-ha-bridge:3000/waha/webhook
 
 volumes:
-  ha_bridge_auth:
+  waha_sessions:
 
 ```
+
+### WhatsApp verbinden (QR-Code)
+
+1. Container starten: `docker compose up -d`.
+2. WAHA-Dashboard öffnen: `http://<host>:3100/dashboard`.
+3. Session `default` starten und den QR-Code mit dem Handy scannen (WhatsApp → Verknüpfte Geräte).
+4. Die Bridge meldet im Log `Session "default": WORKING` – danach kommen eingehende Nachrichten per Webhook an (`POST /waha/webhook`) und HA kann über `/send-message` und `/send-poll` senden.
+
+> Hinweis zum Add-on-Betrieb: Das HA Add-on ist ein einzelner Container und kann WAHA nicht mitbringen. Betreibe WAHA separat (z. B. per Docker auf einem anderen Host) und trage im Add-on unter **Konfiguration** `WAHA_URL` (z. B. `http://192.168.0.2:3100`), `WAHA_API_KEY`, `WAHA_SESSION` und `WAHA_WEBHOOK_URL` (z. B. `http://192.168.0.2:3000/waha/webhook`) ein.
 
 ---
 

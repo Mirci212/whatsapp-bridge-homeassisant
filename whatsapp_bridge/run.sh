@@ -6,6 +6,10 @@ if [ -f /data/options.json ]; then
   export CONVERSATION_AGENT=$(node -p "require('/data/options.json').CONVERSATION_AGENT || ''")
   export STT_ENGINE=$(node -p "require('/data/options.json').STT_ENGINE || ''")
   export GROUP_IDS=$(node -p "require('/data/options.json').GROUP_IDS || ''")
+  export WAHA_URL=$(node -p "require('/data/options.json').WAHA_URL || 'http://192.168.0.2:3100'")
+  export WAHA_API_KEY=$(node -p "require('/data/options.json').WAHA_API_KEY || ''")
+  export WAHA_SESSION=$(node -p "require('/data/options.json').WAHA_SESSION || 'default'")
+  export WAHA_WEBHOOK_URL=$(node -p "require('/data/options.json').WAHA_WEBHOOK_URL || ''")
   export HA_URL="http://supervisor/core"
   # Home Assistant Supervisor Token automatisch nutzen
   export HA_TOKEN="$SUPERVISOR_TOKEN"

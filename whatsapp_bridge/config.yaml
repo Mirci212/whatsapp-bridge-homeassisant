@@ -1,7 +1,7 @@
 name: "WhatsApp Home Assistant Bridge"
 version: "1.0.0"
 slug: "whatsapp_ha_bridge"
-description: "WhatsApp Bot Bridge für Home Assistant mit Baileys und KI-Integration"
+description: "WhatsApp Bot Bridge für Home Assistant über WAHA mit KI-Integration"
 url: "https://github.com/DeinGitHubBenutzer/DeinRepoName"
 arch:
   - aarch64
@@ -21,11 +21,19 @@ schema:
   CONVERSATION_AGENT: string
   STT_ENGINE: string
   GROUP_IDS: string
+  WAHA_URL: string
+  WAHA_API_KEY: password
+  WAHA_SESSION: string
+  WAHA_WEBHOOK_URL: string
 options:
   ADMIN_NUMBER: ""
   ALLOWED_USERS: ""
   CONVERSATION_AGENT: ""
   STT_ENGINE: ""
   GROUP_IDS: ""
+  WAHA_URL: "http://192.168.0.2:3100"
+  WAHA_API_KEY: ""
+  WAHA_SESSION: "default"
+  WAHA_WEBHOOK_URL: "http://192.168.0.2:3000/waha/webhook"
 environment:
   PORT: "3000"

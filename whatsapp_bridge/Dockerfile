@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
-# Git und Build-Tools für npm-Abhängigkeiten installieren, plus FFmpeg für Audio
-RUN apk add --no-cache ffmpeg git python3 make g++
+# FFmpeg für Audio-Transkodierung (WAHA-Medien -> WAV für HA-STT)
+RUN apk add --no-cache ffmpeg
 
 WORKDIR /app
 

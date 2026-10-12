@@ -1,8 +1,24 @@
 services:
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: whatsapp_waha
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      - WAHA_API_KEY=${WAHA_API_KEY:-dein_langer_zufaelliger_api_key}
+      - WHATSAPP_DEFAULT_ENGINE=WEBJS
+      - WHATSAPP_HOOK_URL=http://whatsapp-ha-bridge:3000/waha/webhook
+      - WHATSAPP_HOOK_EVENTS=message,poll.vote,session.status
+    volumes:
+      - waha_sessions:/app/.sessions
+
   whatsapp-ha-bridge:
     image: ghcr.io/mirci212/whatsapp-bridge-homeassisant:latest
     container_name: whatsapp-bridge-homeassisant
     restart: unless-stopped
+    depends_on:
+      - waha
     ports:
       - "3000:3000"
     environment:
@@ -15,8 +31,10 @@ services:
       - STT_ENGINE=stt.faster_whisper
       - GROUP_IDS=120363012345678@g.us:Familie
       - ADMIN_NUMBER=436***
-    volumes:
-      - ha_bridge_auth:/app/auth_info_baileys
+      - WAHA_URL=http://waha:3000
+      - WAHA_API_KEY=${WAHA_API_KEY:-dein_langer_zufaelliger_api_key}
+      - WAHA_SESSION=default
+      - WAHA_WEBHOOK_URL=http://whatsapp-ha-bridge:3000/waha/webhook
 
 volumes:
-  ha_bridge_auth:
+  waha_sessions:
