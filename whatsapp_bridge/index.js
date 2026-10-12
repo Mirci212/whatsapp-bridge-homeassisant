@@ -261,11 +261,26 @@ async function resolveLidToPhone(lidUser) {
   return null;
 }
 
+// Alle String-Felder eines Event-Payloads rekursiv einsammeln (tiefe NOWEB-
+// Events tragen die Nummer oft in _data.remoteJidAlt o.ae. Alternativ-Adressen).
+function collectStrings(obj, out, depth) {
+  if (out.length > 200 || depth > 4) return out;
+  if (typeof obj === "string") {
+    if (obj.length < 80 && (obj.includes("@c.us") || obj.includes("@s.whatsapp.net") || obj.includes("@lid"))) out.push(obj);
+  } else if (Array.isArray(obj)) {
+    for (const v of obj) collectStrings(v, out, depth + 1);
+  } else if (obj && typeof obj === "object") {
+    for (const k of Object.keys(obj)) collectStrings(obj[k], out, depth + 1);
+  }
+  return out;
+}
+
 async function resolveSenderNumber(senderRaw, payload) {
   // 1) Klassischer Fall: echte Nummer in der Adresse.
   const direct = phoneFromChatId(senderRaw);
   if (direct) return direct;
-  // 2) WAHA liefert die Nummer manchmal in Zusatzfeldern des Events.
+  // 2) WAHA liefert die Nummer manchmal in Zusatzfeldern des Events
+  //    (v.a. NOWEB: _data.remoteJidAlt / participantAlt mit @c.us).
   const extraFields = [
     payload && payload.senderNumber,
     payload && payload.participantPhoneNumber,
@@ -273,13 +288,32 @@ async function resolveSenderNumber(senderRaw, payload) {
     payload && payload.fromPhoneNumber,
     payload && payload.remoteJidAlt,
     payload && payload.participantAlt,
+    payload && payload._data && payload._data.remoteJidAlt,
+    payload && payload._data && payload._data.participantAlt,
+    payload && payload._data && payload._data.notifyName === undefined ? null : null,
   ];
   for (const f of extraFields) {
     const num = phoneFromChatId(f);
     if (num) return num;
   }
-  // 3) LID ueber WAHA-Kontakte aufloesen.
-  const lidUser = lidUserOf(senderRaw);
+  // 2b) Tiefensuche ueber das komplette Event (NOWEB versteckt Alt-Adressen
+  //     teils tief in _data). LID-Adressen dabei merken (Schritt 3 braucht sie).
+  let eventLidUser = lidUserOf(senderRaw);
+  if (payload && typeof payload === "object") {
+    const strings = collectStrings(payload, [], 0);
+    for (const s of strings) {
+      const num = phoneFromChatId(s);
+      if (num) {
+        console.log("[LID] Nummer aus Event-Payload gefunden: " + num);
+        if (eventLidUser && !lidToPhoneCache[eventLidUser]) lidToPhoneCache[eventLidUser] = num;
+        return num;
+      }
+      const u = lidUserOf(s);
+      if (u) eventLidUser = eventLidUser || u;
+    }
+  }
+  // 3) LID ueber WAHA-Chats aufloesen (braucht NOWEB-Store, siehe Compose).
+  const lidUser = eventLidUser || lidUserOf(senderRaw);
   if (lidUser) {
     return await resolveLidToPhone(lidUser);
   }
