@@ -93,6 +93,36 @@ if (ADMIN_NUMBER && !ALLOWED_USERS.includes(ADMIN_NUMBER)) {
   ALLOWED_USERS.push(ADMIN_NUMBER);
 }
 
+// -------------------------------------------------------------
+// HA-Tokens pro Nutzer (Format "Nummer:Token", mehrere mit Komma).
+// USER_TOKENS="436...:<token-marco>,43...:<token-brigitte>"
+// Wer keinen Eintrag hat, nutzt HA_TOKEN (Fallback). Damit fuehrt HA
+// Aktionen im Aktivitaetslog unter dem jeweiligen HA-Benutzer aus.
+// ACHTUNG: Tokens stehen im Klartext in der Config - .env nie committen!
+// -------------------------------------------------------------
+const USER_TOKENS = {};
+for (const item of parseIdNameList(process.env.USER_TOKENS)) {
+  const cleanNum = item.id.replace(/[^0-9]/g, "");
+  const token = item.name.trim();
+  if (!cleanNum || !token) {
+    console.warn('[Config] Ignoriere ungueltigen USER_TOKENS-Eintrag: "' + item.id.slice(0, 6) + '..."');
+    continue;
+  }
+  if (USER_TOKENS[cleanNum] && USER_TOKENS[cleanNum] !== token) {
+    console.warn("[Config] Doppelter USER_TOKENS-Eintrag fuer " + cleanNum + " - letzter gewinnt.");
+  }
+  USER_TOKENS[cleanNum] = token;
+}
+
+function haTokenFor(senderNumber) {
+  return (senderNumber && USER_TOKENS[senderNumber]) || HA_TOKEN;
+}
+
+function haAuthHeader(senderNumber) {
+  const token = haTokenFor(senderNumber);
+  return token ? { Authorization: "Bearer " + token } : {};
+}
+
 const GROUP_BOOK = {};
 for (const item of parseIdNameList(process.env.GROUP_IDS)) {
   if (!item.id.toLowerCase().endsWith("@g.us")) {
@@ -432,10 +462,10 @@ async function sendWahaPoll(chatId, name, options) {
 // -------------------------------------------------------------
 // Home Assistant: Conversation + STT
 // -------------------------------------------------------------
-async function fetchAvailableAgents() {
+async function fetchAvailableAgents(senderNumber) {
   try {
     const res = await axios.get(haUrl("/api/states"), {
-      headers: { Authorization: "Bearer " + HA_TOKEN },
+      headers: haAuthHeader(senderNumber),
     });
     return res.data
       .filter((e) => e.entity_id.startsWith("conversation."))
@@ -445,7 +475,7 @@ async function fetchAvailableAgents() {
   }
 }
 
-async function transcribeWahaMedia(mediaUrl) {
+async function transcribeWahaMedia(mediaUrl, senderNumber) {
   if (!currentStt) {
     console.error("[HA STT] Keine STT_ENGINE aktiv.");
     return null;
@@ -466,11 +496,10 @@ async function transcribeWahaMedia(mediaUrl) {
     const wavBuffer = fs.readFileSync(tmpWavPath);
 
     const response = await axios.post(haUrl("/api/stt/" + currentStt), wavBuffer, {
-      headers: {
-        Authorization: "Bearer " + HA_TOKEN,
+      headers: Object.assign(haAuthHeader(senderNumber), {
         "Content-Type": "audio/wav",
         "X-Speech-Content": "language=de; format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1",
-      },
+      }),
     });
 
     if (response.data && response.data.result === "success") {
@@ -495,7 +524,7 @@ async function askHomeAssistant(senderNumber, pushName, text) {
   if (userConversations[senderNumber]) payload.conversation_id = userConversations[senderNumber];
 
   const haResponse = await axios.post(haUrl("/api/conversation/process"), payload, {
-    headers: { Authorization: "Bearer " + HA_TOKEN, "Content-Type": "application/json" },
+    headers: Object.assign(haAuthHeader(senderNumber), { "Content-Type": "application/json" }),
   });
 
   if (haResponse.data && haResponse.data.conversation_id) {
@@ -548,7 +577,7 @@ async function handleIncomingMessage(payload) {
 
   if (!text.trim() && hasMedia && media && media.url && (isAudioHint || !mimetype)) {
     console.log("[Audio empfangen] Transkribiere Sprachnachricht von " + pushName + " ...");
-    text = (await transcribeWahaMedia(media.url)) || "";
+    text = (await transcribeWahaMedia(media.url, senderNumber)) || "";
     if (!text) {
       await sendWahaText(replyChatId, "Fehler: Sprachnachricht konnte nicht transkribiert werden.");
       return;
@@ -623,7 +652,7 @@ async function handleIncomingMessage(payload) {
     }
     const newAgent = text.replace("/setagent", "").trim();
     if (!newAgent) {
-      const agents = await fetchAvailableAgents();
+      const agents = await fetchAvailableAgents(senderNumber);
       await sendWahaText(replyChatId, "Verfuegbare Conversation Agents in HA:\nAktuell aktiv: `" + (currentAgent || "Default") + "`\n\n" + agents.join("\n") + "\n\nNutze: `/setagent <entity_id>`");
     } else {
       currentAgent = newAgent;
@@ -703,6 +732,21 @@ app.get("/health", async (req, res) => {
   res.json({ ok: true, waha: WAHA_URL, session: WAHA_SESSION, status: (status && status.status) || "unknown" });
 });
 
+// WAHA stellt Events manchmal doppelt zu (Retry bzw. NOWEB-Doppelzustellung).
+// Darum Nachrichten-IDs 5 Minuten merken und Duplikate still ignorieren.
+const seenMessageIds = new Map();
+function isDuplicateMessage(payload) {
+  const id = payload && (payload.id || payload.messageId || (payload._data && payload._data.id && payload._data.id.id));
+  if (!id) return false;
+  const now = Date.now();
+  for (const [key, ts] of seenMessageIds) {
+    if (now - ts > 5 * 60 * 1000) seenMessageIds.delete(key);
+  }
+  if (seenMessageIds.has(id)) return true;
+  seenMessageIds.set(id, now);
+  return false;
+}
+
 // WAHA ruft diesen Endpoint pro Event auf.
 app.post("/waha/webhook", async (req, res) => {
   try {
@@ -714,6 +758,10 @@ app.post("/waha/webhook", async (req, res) => {
       return res.json({ ok: true, ignored: "fremde Session" });
     }
     if (event === "message") {
+      if (isDuplicateMessage(payload)) {
+        console.log("[Webhook] Duplikat ignoriert (id:" + (payload.id || payload.messageId || "?") + ")");
+        return res.json({ ok: true, deduplicated: true });
+      }
       await handleIncomingMessage(payload);
     } else if (event === "poll.vote") {
       const vote = payload.vote || payload || {};
@@ -770,6 +818,8 @@ app.post("/send-poll", async (req, res) => {
 // -------------------------------------------------------------
 (async () => {
   console.log("[HA] URL: " + HA_URL + " | Token: " + (HA_TOKEN ? "gesetzt" : "FEHLT!"));
+  const mappedUsers = Object.keys(USER_TOKENS);
+  console.log("[HA] Nutzer-Tokens: " + (mappedUsers.length ? mappedUsers.map((n) => (NUMBER_TO_NAME[n] || n)).join(", ") : "(keine - alle nutzen HA_TOKEN)"));
   console.log("[WAHA] URL: " + WAHA_URL + " | Session: " + WAHA_SESSION + " | Webhook: " + (WAHA_WEBHOOK_URL || "(nicht gesetzt)"));
   try {
     const res = await axios.get(haUrl("/api/"), {

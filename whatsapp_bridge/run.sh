@@ -6,6 +6,7 @@ if [ -f /data/options.json ]; then
   export CONVERSATION_AGENT=$(node -p "require('/data/options.json').CONVERSATION_AGENT || ''")
   export STT_ENGINE=$(node -p "require('/data/options.json').STT_ENGINE || ''")
   export GROUP_IDS=$(node -p "require('/data/options.json').GROUP_IDS || ''")
+  export USER_TOKENS=$(node -p "require('/data/options.json').USER_TOKENS || ''")
   export WAHA_URL=$(node -p "require('/data/options.json').WAHA_URL || 'http://192.168.0.2:3100'")
   export WAHA_API_KEY=$(node -p "require('/data/options.json').WAHA_API_KEY || ''")
   export WAHA_SESSION=$(node -p "require('/data/options.json').WAHA_SESSION || 'default'")

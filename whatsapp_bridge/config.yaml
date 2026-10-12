@@ -21,6 +21,7 @@ schema:
   CONVERSATION_AGENT: string
   STT_ENGINE: string
   GROUP_IDS: string
+  USER_TOKENS: password
   WAHA_URL: string
   WAHA_API_KEY: password
   WAHA_SESSION: string
@@ -31,6 +32,7 @@ options:
   CONVERSATION_AGENT: ""
   STT_ENGINE: ""
   GROUP_IDS: ""
+  USER_TOKENS: ""
   WAHA_URL: "http://192.168.0.2:3100"
   WAHA_API_KEY: ""
   WAHA_SESSION: "default"
