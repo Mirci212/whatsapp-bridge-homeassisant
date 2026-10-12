@@ -475,40 +475,85 @@ async function fetchAvailableAgents(senderNumber) {
   }
 }
 
+// Fehler-Bodys (Buffer/String/JSON) lesbar machen, max 300 Zeichen.
+function decodeHaBody(data) {
+  try {
+    if (!data) return "(leer)";
+    const s = Buffer.isBuffer(data) ? data.toString("utf8") : (typeof data === "string" ? data : JSON.stringify(data));
+    return s.slice(0, 300);
+  } catch (e) {
+    return "(nicht lesbar)";
+  }
+}
+
 async function transcribeWahaMedia(mediaUrl, senderNumber) {
   if (!currentStt) {
     console.error("[HA STT] Keine STT_ENGINE aktiv.");
     return null;
   }
   const absoluteUrl = mediaUrl.startsWith("http") ? mediaUrl : WAHA_URL + (mediaUrl.startsWith("/") ? mediaUrl : "/" + mediaUrl);
+  const urlForLog = absoluteUrl.replace(/([?&]api[_-]?key=)[^&]*/i, "$1***");
   const uniqueId = Date.now();
   const tmpInPath = path.join(__dirname, "tmp_" + uniqueId + ".bin");
   const tmpWavPath = path.join(__dirname, "tmp_" + uniqueId + ".wav");
   try {
-    const dl = await axios.get(absoluteUrl, {
-      headers: WAHA_API_KEY ? { "X-Api-Key": WAHA_API_KEY } : {},
-      responseType: "arraybuffer",
-      timeout: 60000,
-    });
+    // Schritt 1: Audio bei WAHA herunterladen.
+    let dl;
+    try {
+      dl = await axios.get(absoluteUrl, {
+        headers: WAHA_API_KEY ? { "X-Api-Key": WAHA_API_KEY } : {},
+        responseType: "arraybuffer",
+        timeout: 60000,
+      });
+    } catch (dlErr) {
+      const st = dlErr.response ? dlErr.response.status : null;
+      const ct = dlErr.response && dlErr.response.headers ? dlErr.response.headers["content-type"] : null;
+      console.error("[HA STT] Media-Download von WAHA fehlgeschlagen | URL: " + urlForLog + (st ? " | HTTP " + st : "") + (ct ? " | Content-Type: " + ct : "") + " | Body: " + decodeHaBody(dlErr.response && dlErr.response.data) + " | Fehler: " + dlErr.message);
+      return null;
+    }
+    const dlType = (dl.headers && dl.headers["content-type"]) || "(unbekannt)";
+    const dlBytes = dl.data ? dl.data.length : 0;
+    if (/text\/html|application\/json/.test(String(dlType))) {
+      console.error("[HA STT] WAHA lieferte keine Audiodatei (Content-Type: " + dlType + ", " + dlBytes + " Bytes) | URL: " + urlForLog + " | Body: " + decodeHaBody(dl.data));
+      return null;
+    }
+    if (!dlBytes || dlBytes < 500) {
+      console.error("[HA STT] Media-Download unplausibel klein (" + dlBytes + " Bytes, " + dlType + ") | URL: " + urlForLog);
+      return null;
+    }
     fs.writeFileSync(tmpInPath, Buffer.from(dl.data));
 
-    execSync('ffmpeg -y -i "' + tmpInPath + '" -ar 16000 -ac 1 -c:a pcm_s16le "' + tmpWavPath + '"', { stdio: "ignore" });
+    // Schritt 2: nach WAV transkodieren.
+    try {
+      execSync('ffmpeg -y -i "' + tmpInPath + '" -ar 16000 -ac 1 -c:a pcm_s16le "' + tmpWavPath + '"', { stdio: "ignore" });
+    } catch (ffErr) {
+      console.error("[HA STT] ffmpeg-Konvertierung fehlgeschlagen (Eingang: " + dlBytes + " Bytes, " + dlType + "). Laeuft ffmpeg im Container? Fehler: " + ffErr.message);
+      return null;
+    }
     const wavBuffer = fs.readFileSync(tmpWavPath);
 
-    const response = await axios.post(haUrl("/api/stt/" + currentStt), wavBuffer, {
-      headers: Object.assign(haAuthHeader(senderNumber), {
-        "Content-Type": "audio/wav",
-        "X-Speech-Content": "language=de; format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1",
-      }),
-    });
+    // Schritt 3: an HA-STT schicken.
+    let response;
+    try {
+      response = await axios.post(haUrl("/api/stt/" + currentStt), wavBuffer, {
+        headers: Object.assign(haAuthHeader(senderNumber), {
+          "Content-Type": "audio/wav",
+          "X-Speech-Content": "language=de; format=wav; codec=pcm; sample_rate=16000; bit_rate=16; channel=1",
+        }),
+      });
+    } catch (sttErr) {
+      const st = sttErr.response ? sttErr.response.status : null;
+      console.error("[HA STT] HA-Transkription fehlgeschlagen (Engine: " + currentStt + (st ? " | HTTP " + st : "") + ") | Body: " + decodeHaBody(sttErr.response && sttErr.response.data) + " | Fehler: " + sttErr.message);
+      return null;
+    }
 
     if (response.data && response.data.result === "success") {
       return response.data.text;
     }
-    console.error("[HA STT] Unerwartetes Antwortformat:", response.data);
+    console.error("[HA STT] Unerwartetes Antwortformat (Engine: " + currentStt + "):", decodeHaBody(response.data));
     return null;
   } catch (error) {
-    console.error("[HA STT] Fehler bei der Transkription:", (error.response && error.response.data) || error.message);
+    console.error("[HA STT] Unerwarteter Fehler: " + error.message);
     return null;
   } finally {
     try {
@@ -829,6 +874,19 @@ app.post("/send-poll", async (req, res) => {
     console.log("[HA] Erreichbar: " + ((res.data && res.data.message) || "OK"));
   } catch (error) {
     logHaError("HA Check", error);
+  }
+  if (currentStt) {
+    try {
+      await axios.get(haUrl("/api/states/" + currentStt), {
+        headers: HA_TOKEN ? { Authorization: "Bearer " + HA_TOKEN } : {},
+        timeout: 10000,
+      });
+      console.log("[HA] STT-Engine OK: " + currentStt);
+    } catch (error) {
+      console.warn("[HA] STT-Engine \"" + currentStt + "\" nicht gefunden - Sprachnachrichten schlagen fehl! Pruefe STT_ENGINE (Format: stt.<name>, z.B. stt.faster_whisper).");
+    }
+  } else {
+    console.warn("[HA] Keine STT_ENGINE gesetzt - Sprachnachrichten werden abgelehnt.");
   }
   await ensureWahaSessionWithRetry(10, 5000);
 })();
