@@ -144,6 +144,125 @@ function phoneFromChatId(chatId) {
 }
 
 // -------------------------------------------------------------
+// LID -> Telefonnummer Aufloesung
+// WhatsApp schickt seit der LID-Privatsphaere-Umstellung oft nur noch
+// eine anonyme @lid-ID statt der Telefonnummer. Die echte Nummer steht
+// in WAHAs Kontakt-/Chatdaten (Felder id/phoneNumber) und wird hier
+// pro LID einmal abgefragt und dann im Speicher gecacht.
+// -------------------------------------------------------------
+const lidToPhoneCache = {};
+
+function lidUserOf(chatId) {
+  const s = String(chatId || "");
+  if (!s.toLowerCase().endsWith("@lid")) return null;
+  return s.split("@")[0].split(":")[0] || null;
+}
+
+function phoneFromWahaContact(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const candidates = [
+    obj.phoneNumber,
+    obj.number,
+    obj.id,
+    obj.chatId,
+    obj.jid,
+    obj.notifyName === undefined ? null : null,
+  ];
+  // Verschachtelte Kontakt-Objekte (je nach Engine) mitpruefen.
+  const nested = [obj.contact, obj.chat, obj.sender].filter(Boolean);
+  for (const n of nested) {
+    candidates.push(n.phoneNumber, n.number, n.id, n.chatId, n.jid);
+  }
+  for (const c of candidates) {
+    const num = phoneFromChatId(c);
+    if (num) return num;
+  }
+  return null;
+}
+
+async function resolveLidToPhone(lidUser) {
+  if (!lidUser) return null;
+  if (lidToPhoneCache[lidUser]) return lidToPhoneCache[lidUser];
+  const lid = lidUser + "@lid";
+  // 1) Direkter Kontakt-Lookup.
+  const contactPaths = [
+    "/api/" + encodeURIComponent(WAHA_SESSION) + "/contacts/" + encodeURIComponent(lid),
+    "/api/contacts/" + encodeURIComponent(lid) + "?session=" + encodeURIComponent(WAHA_SESSION),
+  ];
+  for (const p of contactPaths) {
+    try {
+      const res = await waha.get(p);
+      const num = phoneFromWahaContact(res.data);
+      if (num) {
+        lidToPhoneCache[lidUser] = num;
+        console.log("[LID] " + lid + " -> " + num + " (Kontakt-Lookup)");
+        return num;
+      }
+    } catch (e) {
+      if (!e.response || (e.response.status !== 404 && e.response.status !== 405)) {
+        console.warn("[LID] Kontakt-Lookup fehlgeschlagen (" + p + "): " + e.message);
+      }
+    }
+  }
+  // 2) Fallback: Kontaktliste durchsuchen (gecacht pro Bridge-Laufzeit via einmaligem Scan).
+  try {
+    const listPaths = [
+      "/api/" + encodeURIComponent(WAHA_SESSION) + "/contacts?limit=1000",
+      "/api/contacts?session=" + encodeURIComponent(WAHA_SESSION) + "&limit=1000",
+    ];
+    for (const p of listPaths) {
+      try {
+        const res = await waha.get(p);
+        const list = Array.isArray(res.data) ? res.data : res.data.contacts || res.data.data || [];
+        for (const c of list) {
+          const num = phoneFromWahaContact(c);
+          const lids = [c.lid, c.contact && c.contact.lid].filter(Boolean).map(String);
+          for (const l of lids) {
+            const u = l.split("@")[0];
+            if (u && num && !lidToPhoneCache[u]) lidToPhoneCache[u] = num;
+          }
+        }
+        if (lidToPhoneCache[lidUser]) {
+          console.log("[LID] " + lid + " -> " + lidToPhoneCache[lidUser] + " (Listen-Scan)");
+          return lidToPhoneCache[lidUser];
+        }
+        break;
+      } catch (e) {
+        if (!e.response || (e.response.status !== 404 && e.response.status !== 405)) throw e;
+      }
+    }
+  } catch (e) {
+    console.warn("[LID] Listen-Scan fehlgeschlagen: " + e.message);
+  }
+  return null;
+}
+
+async function resolveSenderNumber(senderRaw, payload) {
+  // 1) Klassischer Fall: echte Nummer in der Adresse.
+  const direct = phoneFromChatId(senderRaw);
+  if (direct) return direct;
+  // 2) WAHA liefert die Nummer manchmal in Zusatzfeldern des Events.
+  const extraFields = [
+    payload && payload.senderNumber,
+    payload && payload.participantPhoneNumber,
+    payload && payload.authorPhoneNumber,
+    payload && payload.fromPhoneNumber,
+    payload && payload.remoteJidAlt,
+    payload && payload.participantAlt,
+  ];
+  for (const f of extraFields) {
+    const num = phoneFromChatId(f);
+    if (num) return num;
+  }
+  // 3) LID ueber WAHA-Kontakte aufloesen.
+  const lidUser = lidUserOf(senderRaw);
+  if (lidUser) {
+    return await resolveLidToPhone(lidUser);
+  }
+  return null;
+}
+
+// -------------------------------------------------------------
 // WAHA Client
 // -------------------------------------------------------------
 const waha = axios.create({
@@ -187,6 +306,26 @@ async function ensureWahaSession() {
     }
     return null;
   }
+}
+
+// WAHA braucht beim gemeinsamen Start oft laenger als die Bridge
+// (Chromium-Engine, Session-Store). Darum mit Backoff erneut versuchen,
+// statt nur einmal beim Start zu pruefen.
+async function ensureWahaSessionWithRetry(attempts, delayMs) {
+  for (let i = 1; i <= attempts; i++) {
+    const session = await ensureWahaSession();
+    if (session) {
+      if (i > 1) console.log("[WAHA] Nach " + i + ". Versuch verbunden.");
+      return session;
+    }
+    if (i < attempts) {
+      console.log("[WAHA] Erneuter Versuch in " + Math.round(delayMs / 1000) + "s (" + i + "/" + attempts + ") ...");
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(delayMs * 2, 60000);
+    }
+  }
+  console.error("[WAHA] Nach " + attempts + " Versuchen weiterhin nicht erreichbar - pruefe ob der WAHA-Container laeuft (docker ps) und WAHA_URL stimmt.");
+  return null;
 }
 
 async function ensureWahaWebhook() {
@@ -317,7 +456,10 @@ async function handleIncomingMessage(payload) {
 
   const isGroup = String(chatId).endsWith("@g.us");
   const senderRaw = isGroup ? payload.participant || payload.author || "" : chatId;
-  const senderNumber = phoneFromChatId(senderRaw);
+  const senderNumber = await resolveSenderNumber(senderRaw, payload);
+  // Antworten gehen immer an die Original-Adresse zurueck (LID bleibt LID),
+  // nur die Berechtigungspruefung laeuft ueber die aufgeloeste Nummer.
+  const replyChatId = chatId;
 
   const pushName =
     payload.senderName || payload.pushName || (senderNumber && NUMBER_TO_NAME[senderNumber]) || "Unbekannt";
@@ -350,7 +492,7 @@ async function handleIncomingMessage(payload) {
     console.log("[Audio empfangen] Transkribiere Sprachnachricht von " + pushName + " ...");
     text = (await transcribeWahaMedia(media.url)) || "";
     if (!text) {
-      await sendWahaText(chatId, "Fehler: Sprachnachricht konnte nicht transkribiert werden.");
+      await sendWahaText(replyChatId, "Fehler: Sprachnachricht konnte nicht transkribiert werden.");
       return;
     }
   }
@@ -366,7 +508,7 @@ async function handleIncomingMessage(payload) {
 
   if (cleanCmd === "!reset" || cleanCmd === "/reset" || cleanCmd === "cmd_reset" || cleanCmd.includes("verlauf zuruecksetzen") || cleanCmd.includes("verlauf zurücksetzen")) {
     delete userConversations[senderNumber];
-    await sendWahaText(chatId, "Dein Gespraechsverlauf wurde zurueckgesetzt.");
+    await sendWahaText(replyChatId, "Dein Gespraechsverlauf wurde zurueckgesetzt.");
     return;
   }
 
@@ -386,7 +528,7 @@ async function handleIncomingMessage(payload) {
         "- `/groups` - Gruppen mit IDs auflisten\n" +
         "- `/restart` - Bot neu starten";
     }
-    await sendWahaText(chatId, helpMsg);
+    await sendWahaText(replyChatId, helpMsg);
     return;
   }
 
@@ -407,88 +549,88 @@ async function handleIncomingMessage(payload) {
 
   if (cleanCmd === "/ping") {
     const uptimeSeconds = Math.floor(process.uptime());
-    await sendWahaText(chatId, "Pong! Bot laeuft stabil.\nLaufzeit: " + uptimeSeconds + " Sekunden");
+    await sendWahaText(replyChatId, "Pong! Bot laeuft stabil.\nLaufzeit: " + uptimeSeconds + " Sekunden");
     return;
   }
 
   if (cleanCmd === "/whoami") {
-    await sendWahaText(chatId, "Dein Profil\n\n- Name: " + pushName + "\n- Nummer: " + senderNumber + "\n- Admin: " + (isAdmin ? "Ja" : "Nein"));
+    await sendWahaText(replyChatId, "Dein Profil\n\n- Name: " + pushName + "\n- Nummer: " + senderNumber + "\n- Admin: " + (isAdmin ? "Ja" : "Nein"));
     return;
   }
 
   if (cleanCmd.startsWith("/setagent")) {
     if (!isAdmin) {
-      await sendWahaText(chatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
+      await sendWahaText(replyChatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
       return;
     }
     const newAgent = text.replace("/setagent", "").trim();
     if (!newAgent) {
       const agents = await fetchAvailableAgents();
-      await sendWahaText(chatId, "Verfuegbare Conversation Agents in HA:\nAktuell aktiv: `" + (currentAgent || "Default") + "`\n\n" + agents.join("\n") + "\n\nNutze: `/setagent <entity_id>`");
+      await sendWahaText(replyChatId, "Verfuegbare Conversation Agents in HA:\nAktuell aktiv: `" + (currentAgent || "Default") + "`\n\n" + agents.join("\n") + "\n\nNutze: `/setagent <entity_id>`");
     } else {
       currentAgent = newAgent;
-      await sendWahaText(chatId, "Konversations-Agent geaendert zu:\n`" + currentAgent + "`");
+      await sendWahaText(replyChatId, "Konversations-Agent geaendert zu:\n`" + currentAgent + "`");
     }
     return;
   }
 
   if (cleanCmd.startsWith("/setstt")) {
     if (!isAdmin) {
-      await sendWahaText(chatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
+      await sendWahaText(replyChatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
       return;
     }
     const newStt = text.replace("/setstt", "").trim();
     if (!newStt) {
-      await sendWahaText(chatId, "STT Engine\nAktuell aktiv: `" + (currentStt || "Nicht aktiv") + "`\n\nGib den Namen der Engine ein (z. B. `/setstt stt.faster_whisper`).");
+      await sendWahaText(replyChatId, "STT Engine\nAktuell aktiv: `" + (currentStt || "Nicht aktiv") + "`\n\nGib den Namen der Engine ein (z. B. `/setstt stt.faster_whisper`).");
     } else {
       currentStt = newStt;
-      await sendWahaText(chatId, "STT-Engine geaendert zu:\n`" + currentStt + "`");
+      await sendWahaText(replyChatId, "STT-Engine geaendert zu:\n`" + currentStt + "`");
     }
     return;
   }
 
   if (cleanCmd === "/groups") {
     if (!isAdmin) {
-      await sendWahaText(chatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
+      await sendWahaText(replyChatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
       return;
     }
     try {
       const res = await waha.get("/api/" + encodeURIComponent(WAHA_SESSION) + "/groups?limit=100");
       const list = res.data || [];
       if (!list.length) {
-        await sendWahaText(chatId, "Der Bot ist in keiner Gruppe.");
+        await sendWahaText(replyChatId, "Der Bot ist in keiner Gruppe.");
       } else {
         const lines = list.slice(0, 30).map((g) => "- " + (g.subject || g.name || "?") + "\n  `" + g.id + "`");
-        await sendWahaText(chatId, "Gruppen des Bots (" + list.length + "):\n\n" + lines.join("\n") + "\n\nNutze die ID als Empfaenger oder trage sie in GROUP_IDS ein.");
+        await sendWahaText(replyChatId, "Gruppen des Bots (" + list.length + "):\n\n" + lines.join("\n") + "\n\nNutze die ID als Empfaenger oder trage sie in GROUP_IDS ein.");
       }
     } catch (e) {
-      await sendWahaText(chatId, "Fehler beim Abrufen der Gruppen: " + e.message);
+      await sendWahaText(replyChatId, "Fehler beim Abrufen der Gruppen: " + e.message);
     }
     return;
   }
 
   if (cleanCmd === "/restart") {
     if (!isAdmin) {
-      await sendWahaText(chatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
+      await sendWahaText(replyChatId, "Dieser Befehl ist nur dem Administrator vorbehalten.");
       return;
     }
-    await sendWahaText(chatId, "Bot wird im Admin-Auftrag neu gestartet...");
+    await sendWahaText(replyChatId, "Bot wird im Admin-Auftrag neu gestartet...");
     setTimeout(() => process.exit(0), 1000);
     return;
   }
 
   if (cleanCmd === "/menu") {
-    await sendWahaText(chatId, "Hauptmenue\n\nWähle eine Option (einfach Zahl senden):\n\n1. Verlauf zuruecksetzen\n2. System Status\n3. Hilfe anzeigen");
+    await sendWahaText(replyChatId, "Hauptmenue\n\nWähle eine Option (einfach Zahl senden):\n\n1. Verlauf zuruecksetzen\n2. System Status\n3. Hilfe anzeigen");
     return;
   }
 
   console.log('[Nachricht empfangen] Von ' + pushName + ' (' + senderNumber + '): "' + text + '"');
   try {
     const responseText = await askHomeAssistant(senderNumber, pushName, text);
-    await sendWahaText(chatId, responseText);
+    await sendWahaText(replyChatId, responseText);
   } catch (error) {
     logHaError("HA Conversation", error);
-    await sendWahaText(chatId, "Fehler bei der Verarbeitung in Home Assistant.");
+    await sendWahaText(replyChatId, "Fehler bei der Verarbeitung in Home Assistant.");
   }
 }
 
@@ -580,7 +722,7 @@ app.post("/send-poll", async (req, res) => {
   } catch (error) {
     logHaError("HA Check", error);
   }
-  await ensureWahaSession();
+  await ensureWahaSessionWithRetry(10, 5000);
 })();
 
 app.listen(WEBHOOK_PORT, () => {
